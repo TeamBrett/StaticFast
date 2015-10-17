@@ -51,7 +51,7 @@ namespace SpaStaticFile {
         }
 
         private bool ShouldIgnoreRequest(string path) {
-            return path.StartsWith(this.options.IgnorePath);
+            return PathString.FromUriComponent(path).StartsWithSegments(this.options.IgnorePath);
         }
 
         private byte[] GetPage(string path) {
