@@ -1,11 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Threading.Tasks;
 
 using Microsoft.Owin;
 
 namespace SpaStaticFile {
+    using System.Net;
+    using System.Reflection;
+
     public class SpaStaticFile : OwinMiddleware {
         private readonly IDictionary<string, byte[]> site = new Dictionary<string, byte[]>();
         private readonly SpaStaticFileOptions options;
@@ -15,6 +19,15 @@ namespace SpaStaticFile {
             this.options = options;
         }
 
+        public static string AssemblyDirectory {
+            get {
+                string codeBase = Assembly.GetExecutingAssembly().CodeBase;
+                UriBuilder uri = new UriBuilder(codeBase);
+                string path = Uri.UnescapeDataString(uri.Path);
+                return Path.GetDirectoryName(path);
+            }
+        }
+
         public async override Task Invoke(IOwinContext context) {
             var path = Uri.UnescapeDataString(context.Request.Uri.AbsolutePath);
             if (this.ShouldIgnoreRequest(path)) {
@@ -22,7 +35,13 @@ namespace SpaStaticFile {
                 return;
             }
 
-            var page = this.options.ShouldCache ? this.GetCachedPage(path) : this.GetPage(path);
+            byte[] page;
+            try {
+                page = this.options.ShouldCache ? this.GetCachedPage(path) : this.GetPage(path);
+            } catch (FileNotFoundException) {
+                context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                return;
+            }
 
             if (path.EndsWith(".css")) {
                 context.Response.ContentType = "text/css";
@@ -51,16 +70,61 @@ namespace SpaStaticFile {
         }
 
         private bool ShouldIgnoreRequest(string path) {
-            return PathString.FromUriComponent(path).StartsWithSegments(this.options.IgnorePath);
+            var pathString = PathString.FromUriComponent(path);
+            foreach (var ignorePath in this.options.IgnorePaths) {
+                if (pathString.StartsWithSegments(ignorePath)) {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private byte[] GetPage(string path) {
             var file = Path.Combine(this.options.RootPath, path.Trim('/'));
-            return File.Exists(file) ? File.ReadAllBytes(file) : this.GetDefaultFile(path);
+            if (!string.IsNullOrWhiteSpace(this.options.ZipPath)) {
+                var zipFile = Path.Combine(AssemblyDirectory, this.options.ZipPath);
+                if(!File.Exists(zipFile)) {
+                    throw new FileNotFoundException("Could not find site zip", zipFile);
+                }
+
+                var zip = new ZipArchive(File.OpenRead(zipFile), ZipArchiveMode.Read, false);
+                var entry = zip.GetEntry(path.TrimStart('.').TrimStart('/'));
+                if (entry == null) {
+                    return this.GetDefaultFile(path);
+                }
+
+                using (var str = entry.Open()) {
+                    return ReadFully(str);
+                }
+            }
+
+            if (File.Exists(file)) {
+                File.ReadAllBytes(file);
+            }
+
+            return this.GetDefaultFile(path);
         }
 
         private byte[] GetDefaultFile(string path) {
-            return File.ReadAllBytes(Path.Combine(this.options.RootPath, this.options.DefaultFile.Trim('/')));
+            var defaultFile = Path.Combine(this.options.RootPath, this.options.DefaultFile.Trim('/'));
+            if (path != defaultFile) {
+                return this.GetPage(defaultFile);
+            }
+
+            throw new FileNotFoundException("default file not found", defaultFile);
+        }
+
+        public static byte[] ReadFully(Stream input) {
+            var buffer = new byte[16 * 1024];
+            using (var ms = new MemoryStream()) {
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0) {
+                    ms.Write(buffer, 0, read);
+                }
+
+                return ms.ToArray();
+            }
         }
     }
 }
